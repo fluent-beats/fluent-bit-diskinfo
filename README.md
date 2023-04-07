@@ -33,8 +33,7 @@ This input plugin can be configured using the following parameters:
 
  Key                    | Description                                   | Default
 ------------------------|-----------------------------------------------|------------------
- dev_name               | Device name to limit the target. (e.g. sda). If not set, gathers information from all of disks and partitions.
-                                                                        | null
+ dev_name               | Device name to limit the target. (e.g. sda). If not set, gathers information from all of disks and partitions.                                                            | null
  interval_sec           | Interval in seconds to collect data           | 1
  interval_nsec          | Interval in nanoseconds to collect data       | 0
  proc_path              | Path to look for diskstats file               | /proc
