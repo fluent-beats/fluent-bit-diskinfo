@@ -34,14 +34,26 @@
 
 #define LINE_SIZE 256
 #define BUF_SIZE  32
-#define STR_KEY_WRITE "write_size"
-#define STR_KEY_READ  "read_size"
+#define STR_KEY_READ_BYTES  "read_bytes"
+#define STR_KEY_READ_COUNT  "read_count"
+#define STR_KEY_READ_TIME   "read_time"
+#define STR_KEY_WRITE_BYTES "write_bytes"
+#define STR_KEY_WRITE_COUNT "write_count"
+#define STR_KEY_WRITE_TIME  "write_time"
 
 struct flb_in_diskinfo_config {
+    uint64_t *read_sect_total;
     uint64_t *read_total;
+    uint64_t *read_time_total;
+    uint64_t *write_sect_total;
     uint64_t *write_total;
+    uint64_t *write_time_total;
+    uint64_t *prev_read_sect_total;
     uint64_t *prev_read_total;
+    uint64_t *prev_read_time_total;
+    uint64_t *prev_write_sect_total;
     uint64_t *prev_write_total;
+    uint64_t *prev_write_time_total;
     char *proc_path;     /* allows point to host proc file */
     char *dev_name;
     int entry;

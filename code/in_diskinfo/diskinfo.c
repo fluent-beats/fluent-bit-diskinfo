@@ -92,22 +92,56 @@ static int update_disk_stats(struct flb_in_diskinfo_config *ctx)
                shift_line(line, ' ', &i_line, buf, BUF_SIZE-1) != NULL) {
             i_field++;
             switch(i_field) {
+            case 1: /* major number */
+                break;
+            case 2: /* minor mumber */
+                break;
             case 3: /* device name */
                 if (ctx->dev_name != NULL && strstr(buf, ctx->dev_name) == NULL) {
                     skip_line = FLB_TRUE;
                 }
                 break;
+            case 4: /* reads completed (counter)*/
+                 temp_total = strtoull(buf, NULL, 10);
+                 ctx->prev_read_total[i_entry] = ctx->read_total[i_entry];
+                 ctx->read_total[i_entry] = temp_total;
+                break;
+            case 5: /* reads merged */
+                break;
             case 6: /* sectors read */
                 temp_total = strtoull(buf, NULL, 10);
-                ctx->prev_read_total[i_entry] = ctx->read_total[i_entry];
-                ctx->read_total[i_entry] = temp_total;
+                ctx->prev_read_sect_total[i_entry] = ctx->read_sect_total[i_entry];
+                ctx->read_sect_total[i_entry] = temp_total;
+                break;
+            case 7: /* time spent reading (ms) */
+                 temp_total = strtoull(buf, NULL, 10);
+                 ctx->prev_read_time_total[i_entry] = ctx->read_time_total[i_entry];
+                 ctx->read_time_total[i_entry] = temp_total;
+                break;
+            case 8: /* writes completed (counter)*/
+                 temp_total = strtoull(buf, NULL, 10);
+                 ctx->prev_write_total[i_entry] = ctx->write_total[i_entry];
+                 ctx->write_total[i_entry] = temp_total;
+                break;
+            case 9: /* writes merged */
                 break;
             case 10: /* sectors written */
                 temp_total = strtoull(buf, NULL, 10);
-                ctx->prev_write_total[i_entry] = ctx->write_total[i_entry];
-                ctx->write_total[i_entry] = temp_total;
+                ctx->prev_write_sect_total[i_entry] = ctx->write_sect_total[i_entry];
+                ctx->write_sect_total[i_entry] = temp_total;
+                break;
+            case 11: /* time spent writting (ms) */
+                temp_total = strtoull(buf, NULL, 10);
+                 ctx->prev_write_time_total[i_entry] = ctx->write_time_total[i_entry];
+                 ctx->write_time_total[i_entry] = temp_total;
 
                 skip_line = FLB_TRUE;
+                break;
+            case 12: /* I/Os currently in progress */
+                break;
+            case 13: /* time spent doing I/Os (ms) */
+                break;
+            case 14: /* weighted time spent doing I/Os (ms) */
                 break;
             default:
                 continue;
@@ -121,6 +155,18 @@ static int update_disk_stats(struct flb_in_diskinfo_config *ctx)
 }
 
 
+static uint64_t overflow(uint64_t current, uint64_t prev)
+{
+    if (current >= prev) {
+        return current - prev;
+    }
+    else {
+        /* Overflow */
+        return current + (ULONG_MAX - prev);
+    }
+}
+
+
 /* cb_collect callback */
 static int in_diskinfo_collect(struct flb_input_instance *i_ins,
                            struct flb_config *config, void *in_context)
@@ -131,13 +177,17 @@ static int in_diskinfo_collect(struct flb_input_instance *i_ins,
     msgpack_packer mp_pck;
     msgpack_sbuffer mp_sbuf;
 
-    /* The type of sector size is unsigned long in kernel source */
-    unsigned long   read_total = 0;
-    unsigned long  write_total = 0;
+    /* The type is unsigned long in kernel source */
+    unsigned long  read_bytes = 0;
+    unsigned long  read_count = 0;
+    unsigned long  read_time = 0;
+    unsigned long  write_bytes = 0;
+    unsigned long  write_count = 0;
+    unsigned long  write_time = 0;
 
     int entry = ctx->entry;
     int i;
-    int num_map = 2;/* write, read */
+    int num_map = 6;/* read (bytes, count, time), write (bytes, count, time) */
 
     update_disk_stats(ctx);
 
@@ -146,27 +196,17 @@ static int in_diskinfo_collect(struct flb_input_instance *i_ins,
     }
     else {
         for (i = 0; i < entry; i++) {
-            if (ctx->read_total[i] >= ctx->prev_read_total[i]) {
-                read_total += ctx->read_total[i] - ctx->prev_read_total[i];
-            }
-            else {
-                /* Overflow */
-                read_total += ctx->read_total[i] +
-                    (ULONG_MAX - ctx->prev_read_total[i]);
-            }
-
-            if (ctx->write_total[i] >= ctx->prev_write_total[i]) {
-                write_total += ctx->write_total[i] - ctx->prev_write_total[i];
-            }
-            else {
-                /* Overflow */
-                write_total += ctx->write_total[i] +
-                    (ULONG_MAX - ctx->prev_write_total[i]);
-            }
+            read_bytes += overflow(ctx->read_sect_total[i], ctx->prev_read_sect_total[i]);
+            read_count += overflow(ctx->read_total[i], ctx->prev_read_total[i]);
+            read_time += overflow(ctx->read_time_total[i], ctx->prev_read_time_total[i]);
+            write_bytes += overflow(ctx->write_sect_total[i], ctx->prev_write_sect_total[i]);
+            write_count += overflow(ctx->write_total[i], ctx->prev_write_total[i]);
+            write_time += overflow(ctx->write_time_total[i], ctx->prev_write_time_total[i]);
         }
 
-        read_total  *= 512;
-        write_total *= 512;
+        /* Each sector is 512 bytes, so total_bytes = (512 * sectors) */
+        read_bytes  *= 512;
+        write_bytes *= 512;
 
         /* Initialize local msgpack buffer */
         msgpack_sbuffer_init(&mp_sbuf);
@@ -177,14 +217,29 @@ static int in_diskinfo_collect(struct flb_input_instance *i_ins,
         flb_pack_time_now(&mp_pck);
         msgpack_pack_map(&mp_pck, num_map);
 
+        msgpack_pack_str(&mp_pck, strlen(STR_KEY_READ_BYTES));
+        msgpack_pack_str_body(&mp_pck, STR_KEY_READ_BYTES, strlen(STR_KEY_READ_BYTES));
+        msgpack_pack_uint64(&mp_pck, read_bytes);
 
-        msgpack_pack_str(&mp_pck, strlen(STR_KEY_READ));
-        msgpack_pack_str_body(&mp_pck, STR_KEY_READ, strlen(STR_KEY_READ));
-        msgpack_pack_uint64(&mp_pck, read_total);
+        msgpack_pack_str(&mp_pck, strlen(STR_KEY_READ_COUNT));
+        msgpack_pack_str_body(&mp_pck, STR_KEY_READ_COUNT, strlen(STR_KEY_READ_COUNT));
+        msgpack_pack_uint64(&mp_pck, read_count);
 
-        msgpack_pack_str(&mp_pck, strlen(STR_KEY_WRITE));
-        msgpack_pack_str_body(&mp_pck, STR_KEY_WRITE, strlen(STR_KEY_WRITE));
-        msgpack_pack_uint64(&mp_pck, write_total);
+        msgpack_pack_str(&mp_pck, strlen(STR_KEY_READ_TIME));
+        msgpack_pack_str_body(&mp_pck, STR_KEY_READ_TIME, strlen(STR_KEY_READ_TIME));
+        msgpack_pack_uint64(&mp_pck, read_time);
+
+        msgpack_pack_str(&mp_pck, strlen(STR_KEY_WRITE_BYTES));
+        msgpack_pack_str_body(&mp_pck, STR_KEY_WRITE_BYTES, strlen(STR_KEY_WRITE_BYTES));
+        msgpack_pack_uint64(&mp_pck, write_bytes);
+
+        msgpack_pack_str(&mp_pck, strlen(STR_KEY_WRITE_COUNT));
+        msgpack_pack_str_body(&mp_pck, STR_KEY_WRITE_COUNT, strlen(STR_KEY_WRITE_COUNT));
+        msgpack_pack_uint64(&mp_pck, write_count);
+
+        msgpack_pack_str(&mp_pck, strlen(STR_KEY_WRITE_TIME));
+        msgpack_pack_str_body(&mp_pck, STR_KEY_WRITE_TIME, strlen(STR_KEY_WRITE_TIME));
+        msgpack_pack_uint64(&mp_pck, write_time);
 
         flb_input_chunk_append_raw(i_ins, NULL, 0, mp_sbuf.data, mp_sbuf.size);
         msgpack_sbuffer_destroy(&mp_sbuf);
@@ -212,13 +267,97 @@ static int get_diskstats_entries(void)
     return ret;
 }
 
+static void init_disk_config_arrays(struct flb_in_diskinfo_config *disk_config, int entry)
+{
+    int i;
+    for (i=0; i<entry; i++) {
+        disk_config->read_sect_total[i] = 0;
+        disk_config->read_total[i] = 0;
+        disk_config->read_time_total[i] = 0;
+        disk_config->write_sect_total[i] = 0;
+        disk_config->write_total[i] = 0;
+        disk_config->write_time_total[i] = 0;
+        disk_config->prev_read_sect_total[i] = 0;
+        disk_config->prev_read_total[i] = 0;
+        disk_config->prev_read_time_total[i] = 0;
+        disk_config->prev_write_sect_total[i] = 0;
+        disk_config->prev_write_total[i] = 0;
+        disk_config->prev_write_time_total[i] = 0;
+    }
+}
+
+static void disk_config_malloc(struct flb_in_diskinfo_config *disk_config, int entry)
+{
+    disk_config->read_sect_total = (uint64_t*)flb_malloc(sizeof(uint64_t)*entry);
+    disk_config->read_total = (uint64_t*)flb_malloc(sizeof(uint64_t)*entry);
+    disk_config->read_time_total = (uint64_t*)flb_malloc(sizeof(uint64_t)*entry);
+    disk_config->write_sect_total = (uint64_t*)flb_malloc(sizeof(uint64_t)*entry);
+    disk_config->write_total = (uint64_t*)flb_malloc(sizeof(uint64_t)*entry);
+    disk_config->write_time_total = (uint64_t*)flb_malloc(sizeof(uint64_t)*entry);
+    disk_config->prev_read_sect_total = (uint64_t*)flb_malloc(sizeof(uint64_t)*entry);
+    disk_config->prev_read_total = (uint64_t*)flb_malloc(sizeof(uint64_t)*entry);
+    disk_config->prev_read_time_total = (uint64_t*)flb_malloc(sizeof(uint64_t)*entry);
+    disk_config->prev_write_sect_total = (uint64_t*)flb_malloc(sizeof(uint64_t)*entry);
+    disk_config->prev_write_total = (uint64_t*)flb_malloc(sizeof(uint64_t)*entry);
+    disk_config->prev_write_time_total = (uint64_t*)flb_malloc(sizeof(uint64_t)*entry);
+    disk_config->entry = entry;
+}
+
+static bool check_disk_config_malloc(struct flb_in_diskinfo_config *disk_config) {
+    return disk_config->read_sect_total            == NULL ||
+           disk_config->read_total                 == NULL ||
+           disk_config->read_time_total            == NULL ||
+           disk_config->write_sect_total           == NULL ||
+           disk_config->write_total                == NULL ||
+           disk_config->write_time_total           == NULL ||
+           disk_config->prev_read_sect_total       == NULL ||
+           disk_config->prev_read_total            == NULL ||
+           disk_config->prev_read_time_total       == NULL ||
+           disk_config->prev_write_sect_total      == NULL ||
+           disk_config->prev_write_total           == NULL ||
+           disk_config->prev_write_time_total      == NULL;
+}
+
+static void free_disk_config(struct flb_in_diskinfo_config *disk_config)
+{
+    flb_free(disk_config->read_sect_total);
+    flb_free(disk_config->read_total);
+    flb_free(disk_config->read_time_total);
+    flb_free(disk_config->write_sect_total);
+    flb_free(disk_config->write_total);
+    flb_free(disk_config->write_time_total);
+    flb_free(disk_config->prev_read_sect_total);
+    flb_free(disk_config->prev_read_total);
+    flb_free(disk_config->prev_read_time_total);
+    flb_free(disk_config->prev_write_sect_total);
+    flb_free(disk_config->prev_write_total);
+    flb_free(disk_config->prev_write_time_total);
+    flb_free(disk_config->dev_name);
+    flb_free(disk_config);
+}
+
+static void init_disk_config_with_nulls(struct flb_in_diskinfo_config *disk_config)
+{
+    disk_config->read_sect_total = NULL;
+    disk_config->read_total = NULL;
+    disk_config->read_time_total = NULL;
+    disk_config->write_sect_total = NULL;
+    disk_config->write_total = NULL;
+    disk_config->write_time_total = NULL;
+    disk_config->prev_read_sect_total = NULL;
+    disk_config->prev_read_total = NULL;
+    disk_config->prev_read_time_total = NULL;
+    disk_config->prev_write_sect_total = NULL;
+    disk_config->prev_write_total = NULL;
+    disk_config->prev_write_time_total = NULL;
+}
+
 static int configure(struct flb_in_diskinfo_config *disk_config,
                      struct flb_input_instance *in)
 {
     (void) *in;
     const char *pval = NULL;
     int entry = 0;
-    int i;
 
     /* diskstats file setting */
     pval = flb_input_get_property("proc_path", in);
@@ -265,27 +404,15 @@ static int configure(struct flb_in_diskinfo_config *disk_config,
         return -1;
     }
 
-    disk_config->read_total = (uint64_t*)flb_malloc(sizeof(uint64_t)*entry);
-    disk_config->write_total = (uint64_t*)flb_malloc(sizeof(uint64_t)*entry);
-    disk_config->prev_read_total = (uint64_t*)flb_malloc(sizeof(uint64_t)*entry);
-    disk_config->prev_write_total = (uint64_t*)flb_malloc(sizeof(uint64_t)*entry);
-    disk_config->entry = entry;
+    disk_config_malloc(disk_config, entry);
 
-    if ( disk_config->read_total       == NULL ||
-         disk_config->write_total      == NULL ||
-         disk_config->prev_read_total  == NULL ||
-         disk_config->prev_write_total == NULL) {
+    if (check_disk_config_malloc(disk_config)) {
         flb_plg_error(in, "could not allocate memory");
         return -1;
     }
 
     /* initialize */
-    for (i=0; i<entry; i++) {
-        disk_config->read_total[i] = 0;
-        disk_config->write_total[i] = 0;
-        disk_config->prev_read_total[i] = 0;
-        disk_config->prev_write_total[i] = 0;
-    }
+    init_disk_config_arrays(disk_config, entry);
     update_disk_stats(disk_config);
 
     disk_config->first_snapshot = FLB_TRUE;    /* assign first_snapshot with FLB_TRUE */
@@ -305,10 +432,7 @@ static int in_diskinfo_init(struct flb_input_instance *in,
     if (disk_config == NULL) {
         return -1;
     }
-    disk_config->read_total = NULL;
-    disk_config->write_total = NULL;
-    disk_config->prev_read_total = NULL;
-    disk_config->prev_write_total = NULL;
+    init_disk_config_with_nulls(disk_config);
 
     /* Initialize head config */
     ret = configure(disk_config, in);
@@ -330,11 +454,7 @@ static int in_diskinfo_init(struct flb_input_instance *in,
     return 0;
 
   init_error:
-    flb_free(disk_config->read_total);
-    flb_free(disk_config->write_total);
-    flb_free(disk_config->prev_read_total);
-    flb_free(disk_config->prev_write_total);
-    flb_free(disk_config);
+    free_disk_config(disk_config);
     return -1;
 }
 
@@ -343,12 +463,7 @@ static int in_diskinfo_exit(void *data, struct flb_config *config)
     (void) *config;
     struct flb_in_diskinfo_config *disk_config = data;
 
-    flb_free(disk_config->read_total);
-    flb_free(disk_config->write_total);
-    flb_free(disk_config->prev_read_total);
-    flb_free(disk_config->prev_write_total);
-    flb_free(disk_config->dev_name);
-    flb_free(disk_config);
+    free_disk_config(disk_config);
     return 0;
 }
 
